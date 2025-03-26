@@ -34,6 +34,11 @@ class MatchResult(BaseModel):
 
 from fastapi import Form
 
+@app.get("/")
+async def root():
+    return {"message": "Resume Matcher API is live!"}
+
+
 @app.post("/upload-and-analyze", response_model=MatchResult)
 async def upload_and_analyze(
     file: UploadFile = File(...),
