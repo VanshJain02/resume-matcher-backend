@@ -19,14 +19,18 @@ app.post('/api/upload', async (req, res) => {
   try {
     // Access protected keys from environment
     const supabaseConfig = {
-      url: process.env.SUPABASE_URL,
-      key: process.env.SUPABASE_KEY
+      url: process.env.REACT_APP_SUPABASE_URL,
+      key: process.env.REACT_APP_SUPABASE_KEY
     };
 
     const firebaseConfig = {
-      apiKey: process.env.FIREBASE_API_KEY,
-      authDomain: process.env.FIREBASE_AUTH_DOMAIN,
-      projectId: process.env.FIREBASE_PROJECT_ID
+      apiKey: process.env.REACT_APP_FIREBASE_API_KEY,
+      authDomain: process.env.REACT_APP_FIREBASE_AUTH_DOMAIN,
+      projectId: process.env.REACT_APP_FIREBASE_PROJECT_ID,
+      storageBucket: process.env.REACT_APP_FIREBASE_STORAGE_BUCKET,
+      messagingSenderId: "78745625538",
+      appId: "1:78745625538:web:8242b3caa94c9f79c4ec5b",
+      measurementId: "G-9N9M6GX9KX"
     };
 
     // Your business logic here
