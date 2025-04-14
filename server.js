@@ -127,10 +127,12 @@ app.get('/api/matches', verifyUser, async (req, res) => {
 });
 
 app.delete('/api/matches/:matchId', verifyUser, async (req, res) => {
-  try {
+    console.log(req.params.matchId);
+    try {
     const matchRef = db.collection('users').doc(req.user.uid)
                       .collection('matches').doc(req.params.matchId);
     await matchRef.delete();
+
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: 'Failed to delete match' });
@@ -370,6 +372,86 @@ app.post("/api/match-ai", upload.any(), async (req, res) => {
     res.status(500).json({ error: "Failed to match resume with AI" });
   }
 });
+  
+
+
+
+
+
+// Add to your existing server.js routes
+app.post('/api/generate-referral', 
+    verifyUser, 
+    upload.single('resume'),
+    async (req, res) => {
+      try {
+        const { job_desc, comp_name, title } = req.body;
+        const user = req.user;
+        
+        // Validate required fields
+        if (!job_desc || !comp_name || !title) {
+          return res.status(400).json({ error: 'Missing required job details' });
+        }
+  
+        // Handle resume from either upload or profile
+        let resumeBuffer;
+        if (req.file) {
+          // Use uploaded resume
+          resumeBuffer = req.file.buffer;
+        } else {
+          // Try to fetch from profile storage
+          const [profileResume] = await bucket.file(`users/${user.uid}/resume.pdf`).download();
+          resumeBuffer = profileResume;
+        }
+  
+        if (!resumeBuffer) {
+          return res.status(400).json({
+            error: 'No resume found. Please upload a resume or save one in your profile',
+            code: 'RESUME_REQUIRED'
+          });
+        }
+  
+        // Prepare payload for AI service
+        const form = new FormData();
+        form.append('resume', resumeBuffer, { filename: 'resume.pdf' });
+        form.append('job_desc', job_desc);
+        form.append('comp_name', comp_name);
+        form.append('title', title);
+        
+        // Call AI service
+        const aiResponse = await axios.post(
+          process.env.AI_SERVICE_URL || 'https://vanshjain02-resume-matcher.hf.space/generate-referral',
+          form,
+          {
+            headers: form.getHeaders(),
+            timeout: 45000 // 45 seconds timeout
+          }
+        );
+  
+        // Format response
+        res.json({
+          success: true,
+          referral_message: aiResponse.data.referral_message,
+          model_metadata: {
+            model: aiResponse.data.model_used,
+            safety_ratings: aiResponse.data.safety_ratings
+          }
+        });
+  
+      } catch (error) {
+        console.log('[Referral Error]', error);
+        
+        const status = error.response?.status || 500;
+        const message = error.response?.data?.error?.message ||
+          'Failed to generate referral message. Please try again.';
+  
+        res.status(status).json({
+          success: false,
+          error: message,
+          ...(error.response?.data?.details && { details: error.response.data.details })
+        });
+      }
+    }
+  );
   
 
 const PORT = process.env.PORT || 3001;
