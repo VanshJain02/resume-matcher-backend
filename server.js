@@ -127,7 +127,6 @@ app.get('/api/matches', verifyUser, async (req, res) => {
 });
 
 app.delete('/api/matches/:matchId', verifyUser, async (req, res) => {
-    console.log(req.params.matchId);
     try {
     const matchRef = db.collection('users').doc(req.user.uid)
                       .collection('matches').doc(req.params.matchId);
@@ -376,33 +375,42 @@ app.post("/api/match-ai", upload.any(), async (req, res) => {
 
 
 
-
-
-// Add to your existing server.js routes
 app.post('/api/generate-referral', 
     verifyUser, 
     upload.single('resume'),
     async (req, res) => {
       try {
-        const { job_desc, comp_name, title } = req.body;
+        const { job_desc, comp_name, title, file_path } = req.body;
         const user = req.user;
-        
-        // Validate required fields
+        const filePath = decodeURIComponent(file_path);
         if (!job_desc || !comp_name || !title) {
           return res.status(400).json({ error: 'Missing required job details' });
         }
   
-        // Handle resume from either upload or profile
         let resumeBuffer;
+  
+        // 1. Check uploaded file
         if (req.file) {
-          // Use uploaded resume
           resumeBuffer = req.file.buffer;
-        } else {
-          // Try to fetch from profile storage
-          const [profileResume] = await bucket.file(`users/${user.uid}/resume.pdf`).download();
-          resumeBuffer = profileResume;
+        }
+        // 2. If not uploaded, fetch from Supabase using provided file_path
+        if (!resumeBuffer && filePath) {
+          const { data, error: downloadError } = await supabase
+            .storage
+            .from('resumes') // <-- Replace with your actual bucket name
+            .download(filePath);
+          if (downloadError || !data) {
+            return res.status(400).json({
+              error: 'Could not fetch resume from profile',
+              code: 'RESUME_FETCH_FAILED',
+              details: downloadError?.message
+            });
+          }
+  
+          resumeBuffer = Buffer.from(await data.arrayBuffer());
         }
   
+        // 3. If still no resume found
         if (!resumeBuffer) {
           return res.status(400).json({
             error: 'No resume found. Please upload a resume or save one in your profile',
@@ -416,18 +424,16 @@ app.post('/api/generate-referral',
         form.append('job_desc', job_desc);
         form.append('comp_name', comp_name);
         form.append('title', title);
-        
-        // Call AI service
+  
         const aiResponse = await axios.post(
           process.env.AI_SERVICE_URL || 'https://vanshjain02-resume-matcher.hf.space/generate-referral',
           form,
           {
             headers: form.getHeaders(),
-            timeout: 45000 // 45 seconds timeout
+            timeout: 45000
           }
         );
   
-        // Format response
         res.json({
           success: true,
           referral_message: aiResponse.data.referral_message,
@@ -438,8 +444,8 @@ app.post('/api/generate-referral',
         });
   
       } catch (error) {
-        console.log('[Referral Error]', error);
-        
+        console.error('[Referral Error]', error);
+  
         const status = error.response?.status || 500;
         const message = error.response?.data?.error?.message ||
           'Failed to generate referral message. Please try again.';
