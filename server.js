@@ -32,8 +32,17 @@ const supabase = createClient(
 // Secure File Upload Endpoint
 
 // Middleware
-app.use(cors({ origin: process.env.FRONTEND_URL })); // Restrict CORS
-// app.use(express.json({ limit: '10kb' }));
+const allowedOrigins = [process.env.FRONTEND_URL, 'http://localhost:3000'];
+app.use(cors({
+  origin: function (origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+}));// app.use(express.json({ limit: '10kb' }));
 app.use(express.json());
 
 // Rate limiting
