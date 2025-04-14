@@ -1,17 +1,20 @@
 const express = require('express');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
-const { initializeApp, applicationDefault } = require('firebase-admin/app');
-const { getFirestore } = require('firebase-admin/firestore');
 const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config();
 
 const app = express();
 
-// Initialize Firebase Admin SDK (Secure Server-Side Access)
+const { initializeApp, cert } = require('firebase-admin/app');
+const { getFirestore } = require('firebase-admin/firestore');
+
 initializeApp({
-  credential: applicationDefault(),
-  projectId: process.env.FIREBASE_PROJECT_ID
+  credential: cert({
+    projectId: process.env.FIREBASE_PROJECT_ID,
+    clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+    privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n')
+  })
 });
 
 const db = getFirestore();
@@ -119,7 +122,56 @@ app.post('/api/upload-resume', verifyUser, async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: 'File upload failed' });
   }
+  
 });
+
+
+app.put('/api/profile', verifyUser, async (req, res) => {
+    try {
+      const profileData = req.body;
+      const userRef = db.collection('users').doc(req.user.uid);
+      
+      // Add validation for profile data
+      if (!profileData || typeof profileData !== 'object') {
+        return res.status(400).json({ error: 'Invalid profile data' });
+      }
+  
+      // Remove sensitive fields if present
+      delete profileData.roles;
+      delete profileData.permissions;
+  
+      await userRef.set(profileData, { merge: true });
+      res.json({ success: true });
+    } catch (err) {
+      res.status(500).json({ error: 'Profile update failed' });
+    }
+  });
+  
+  app.get('/api/profile', verifyUser, async (req, res) => {
+    try {
+      const userRef = db.collection('users').doc(req.user.uid);
+      const docSnap = await userRef.get();
+      
+      if (!docSnap.exists) {
+        return res.status(404).json({ error: 'Profile not found' });
+      }
+  
+      const profileData = docSnap.data();
+      
+      // Sanitize sensitive data before sending to frontend
+      const safeData = {
+        name: profileData.name,
+        email: profileData.email,
+        preferences: profileData.preferences
+        // Only expose necessary fields
+      };
+  
+      res.json(safeData);
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to fetch profile' });
+    }
+  });
+  
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
