@@ -1,46 +1,125 @@
 const express = require('express');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
+const { initializeApp, applicationDefault } = require('firebase-admin/app');
+const { getFirestore } = require('firebase-admin/firestore');
+const { createClient } = require('@supabase/supabase-js');
+require('dotenv').config();
+
 const app = express();
 
-// Middleware
-app.use(cors());
-app.use(express.json());
+// Initialize Firebase Admin SDK (Secure Server-Side Access)
+initializeApp({
+  credential: applicationDefault(),
+  projectId: process.env.FIREBASE_PROJECT_ID
+});
 
-// Rate limiting (100 requests/15min)
+const db = getFirestore();
+
+// Initialize Supabase (Server-Side Only)
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_KEY // Use service role key here
+);
+
+// Middleware
+app.use(cors({ origin: process.env.FRONTEND_URL })); // Restrict CORS
+app.use(express.json({ limit: '10kb' }));
+
+// Rate limiting
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100
 });
 app.use(limiter);
 
-// Secure API Endpoints
-app.post('/api/upload', async (req, res) => {
+// Helper Middleware to verify Firebase ID token
+const verifyUser = async (req, res, next) => {
+  const idToken = req.headers.authorization?.split('Bearer ')[1];
+  
+  if (!idToken) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
   try {
-    // Access protected keys from environment
-    const supabaseConfig = {
-      url: process.env.REACT_APP_SUPABASE_URL,
-      key: process.env.REACT_APP_SUPABASE_KEY
-    };
-
-    const firebaseConfig = {
-      apiKey: process.env.REACT_APP_FIREBASE_API_KEY,
-      authDomain: process.env.REACT_APP_FIREBASE_AUTH_DOMAIN,
-      projectId: process.env.REACT_APP_FIREBASE_PROJECT_ID,
-      storageBucket: process.env.REACT_APP_FIREBASE_STORAGE_BUCKET,
-      messagingSenderId: "78745625538",
-      appId: "1:78745625538:web:8242b3caa94c9f79c4ec5b",
-      measurementId: "G-9N9M6GX9KX"
-    };
-
-    // Your business logic here
-    res.json({ success: true });
-    
+    const auth = getAuth();
+    const decodedToken = await auth.verifyIdToken(idToken);
+    req.user = { uid: decodedToken.uid };
+    next();
   } catch (err) {
-    res.status(500).json({ error: 'Server error' });
+    res.status(401).json({ error: 'Invalid token' });
+  }
+};
+
+// Secure Endpoints
+app.post('/api/matches', verifyUser, async (req, res) => {
+  try {
+    const { resumeText, jobDescription, matchResult } = req.body;
+    const matchesRef = db.collection('users').doc(req.user.uid).collection('matches');
+    
+    const docRef = await matchesRef.add({
+      resumeText,
+      jobDescription,
+      matchResult,
+      createdAt: FieldValue.serverTimestamp()
+    });
+
+    res.json({ id: docRef.id, success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to save match' });
+  }
+});
+
+app.get('/api/matches', verifyUser, async (req, res) => {
+  try {
+    const matchesRef = db.collection('users').doc(req.user.uid).collection('matches');
+    const snapshot = await matchesRef.get();
+    
+    const matches = snapshot.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data()
+    }));
+    
+    res.json(matches);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch matches' });
+  }
+});
+
+app.delete('/api/matches/:matchId', verifyUser, async (req, res) => {
+  try {
+    const matchRef = db.collection('users').doc(req.user.uid)
+                      .collection('matches').doc(req.params.matchId);
+    await matchRef.delete();
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to delete match' });
+  }
+});
+
+// Secure File Upload Endpoint
+app.post('/api/upload-resume', verifyUser, async (req, res) => {
+  try {
+    const { file } = req.body;
+    const fileName = `${req.user.uid}/${Date.now()}_${file.name}`;
+
+    // Upload to Supabase
+    const { data, error } = await supabase.storage
+      .from('resumes')
+      .upload(fileName, file);
+
+    if (error) throw error;
+
+    // Generate signed URL (time-limited access)
+    const { data: signedUrl } = await supabase.storage
+      .from('resumes')
+      .createSignedUrl(data.path, 3600); // 1 hour expiration
+
+    res.json({ url: signedUrl.signedUrl });
+  } catch (err) {
+    res.status(500).json({ error: 'File upload failed' });
   }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => 
-  console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
