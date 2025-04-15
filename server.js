@@ -111,12 +111,21 @@ console.log('Starting server with environment:', {
   
 
   const generateCacheKey = (query) => {
-    const sortedParams = Object.keys(query).sort().reduce((acc, key) => {
-      acc[key] = query[key];
+    // Clone and normalize parameters
+    const normalized = {...query};
+    delete normalized.cursor; // Cursor shouldn't affect cache key
+    if (normalized.roleType) normalized.roleType = normalized.roleType.toLowerCase();
+    if (normalized.company) normalized.company = normalized.company.toLowerCase().trim();
+    if (normalized.title) normalized.title = normalized.title.toLowerCase().trim();
+  
+    // Sort parameters alphabetically
+    const sortedParams = Object.keys(normalized).sort().reduce((acc, key) => {
+      acc[key] = normalized[key];
       return acc;
     }, {});
-    return `jobs-${JSON.stringify(sortedParams)}`;
-  };
+    
+    return `jobs-${JSON.stringify(sortedParams)}-${normalized.limit || 30}`;
+  }
 
   // Migration script (run once)
 // const migrateJobs = async () => {
@@ -143,54 +152,54 @@ app.get('/api/jobs', async (req, res) => {
       console.log("Fetching...");
       const { limit = 30, cursor, roleType, company, title } = req.query;
       const parsedLimit = Math.min(parseInt(limit), 30);
-      const cacheKey = `jobs-${JSON.stringify(req.query)}`;
-  
-      if (cache.get(cacheKey)) {
-        console.log("Using Cache");
-        return res.json(cache.get(cacheKey));
+      const cacheKey = generateCacheKey(req.query);
+
+      const cached = cache.get(cacheKey);
+      if (cached) {
+        console.log("Cache hit for", cacheKey);
+        return res.json(cached);
       }
-  
+      console.log("Cache miss for", cacheKey);
+
       const jobTypes = roleType ? [roleType] : ['Internship', 'Full-time'];
       let query = db.collection('jobs')
                    .where('type', 'in', jobTypes)
                    .orderBy('posted', 'desc')
                    .limit(parsedLimit);
   
-      // Add filters
+      // Case-insensitive search filters
       if (company) {
-        const companyLC = company.toLowerCase();
+        const companyLC = company.toLowerCase().trim();
         query = query.where('company_lower', '>=', companyLC)
                      .where('company_lower', '<=', companyLC + '\uf8ff');
       }
   
       if (title) {
-        const titleLC = title.toLowerCase();
+        const titleLC = title.toLowerCase().trim();
         query = query.where('title_lower', '>=', titleLC)
                      .where('title_lower', '<=', titleLC + '\uf8ff');
       }
   
-      // Pagination
+      // Improved pagination using document snapshot instead of date
       if (cursor) {
-        const cursorDate = new Date(cursor);
-        query = query.startAfter(cursorDate);
+        const lastDoc = await db.collection('jobs').doc(cursor).get();
+        query = query.startAfter(lastDoc);
       }
-      console.log("Fetched Using Firebase");
+  
       const snapshot = await query.get();
       const jobs = snapshot.docs.map(doc => ({
         id: doc.id,
         ...doc.data(),
-        posted: doc.data().posted instanceof admin.firestore.Timestamp
-        ? doc.data().posted.toDate()
-        : new Date(doc.data().posted)      }));
+        posted: doc.data().posted.toDate().toISOString()
+      }));
   
-      // Get next cursor
-      const lastPosted = jobs.length > 0 ? jobs[jobs.length - 1].posted : null;
-      const response = { 
-        jobs, 
-        nextCursor: lastPosted ? lastPosted.toISOString() : null,
+      const response = {
+        jobs,
+        nextCursor: jobs.length ? snapshot.docs[snapshot.docs.length-1].id : null,
         limit: parsedLimit
       };
-      cache.set(cacheKey, response, 600); // Cache for 10 minutes
+  
+      cache.set(cacheKey, response, 600); // 10-minute TTL
       res.json(response);
     } catch (err) {
         console.log(err);
