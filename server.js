@@ -13,7 +13,7 @@ const upload = multer({ storage: multer.memoryStorage() });
 const admin = require('firebase-admin');
 const FormData = require('form-data');
 const FieldValue = admin.firestore.FieldValue; // <-- Add this
-const { Filter } = require('firebase-admin/firestore');
+
 initializeApp({
   credential: cert({
     projectId: process.env.FIREBASE_PROJECT_ID,
@@ -151,7 +151,7 @@ app.get('/api/jobs', async (req, res) => {
     try {
       console.log("Fetching...");
       const { limit = 30, cursor, roleType, company, title } = req.query;
-      const parsedLimit = Math.min(parseInt(limit), 30);
+      const parsedLimit = Math.min(parseInt(limit), 100);
       const cacheKey = generateCacheKey(req.query);
 
       const cached = cache.get(cacheKey);
@@ -185,16 +185,37 @@ app.get('/api/jobs', async (req, res) => {
         const lastDoc = await db.collection('jobs').doc(cursor).get();
         query = query.startAfter(lastDoc);
       }
+
+      
   
       const snapshot = await query.get();
-      const jobs = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data(),
-        posted: doc.data().posted instanceof admin.firestore.Timestamp
-        ? doc.data().posted.toDate()
-        : new Date(doc.data().posted) 
-      }));
+    //   const jobs = snapshot.docs.map(doc => ({
+    //     id: doc.id,
+    //     ...doc.data(),
+    //     posted: formatDistanceToNow(new Date(doc.data().posted), { addSuffix: true })
+
+    //     // posted: doc.data().posted instanceof admin.firestore.Timestamp
+    //     // ? doc.data().posted.toDate()
+    //     // : new Date(doc.data().posted) 
+    //   }));
   
+      const jobs = snapshot.docs.map(doc => {
+        const rawDate = doc.data().posted;
+        let dateObj;
+        
+        if (rawDate instanceof admin.firestore.Timestamp) {
+          dateObj = rawDate.toDate();
+        } else {
+          // Parse as UTC explicitly
+          dateObj = new Date(rawDate.endsWith('Z') ? rawDate : rawDate + 'Z');
+        }
+      
+        return {
+          id: doc.id,
+          ...doc.data(),
+          posted: dateObj.toISOString() // Keep as UTC ISO string
+        };
+      });
       const response = {
         jobs,
         nextCursor: jobs.length ? snapshot.docs[snapshot.docs.length-1].id : null,
@@ -208,6 +229,10 @@ app.get('/api/jobs', async (req, res) => {
       res.status(500).json({ error: err.message });
     }
   });
+
+
+
+  
   
 
 
