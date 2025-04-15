@@ -26,7 +26,7 @@ const db = getFirestore();
 
 // Cache setup
 const NodeCache = require('node-cache');
-const cache = new NodeCache({ stdTTL: 300 }); // 5-minute cache
+const cache = new NodeCache({ stdTTL: 1800 }); // 5-minute cache
 
 
 
@@ -112,59 +112,75 @@ console.log('Starting server with environment:', {
 
 // Secure Endpoints
 
-
-// Optimized Jobs Endpoint
 app.get('/api/jobs', async (req, res) => {
     try {
       const { limit = 30, cursor, roleType, company, title } = req.query;
-      const parsedLimit = Math.min(parseInt(limit), 50);
+      const parsedLimit = Math.min(parseInt(limit), 30);
       const cacheKey = `jobs-${JSON.stringify(req.query)}`;
   
-      // Check cache first
-      const cached = cache.get(cacheKey);
-      if (cached) return res.json(cached);
-  
-      const jobsRef = db.collection('jobs');
-      const jobTypes = roleType ? [roleType] : ['Internship', 'Full-time', 'Co-op'];
-      let query = jobsRef.where('type', 'in', jobTypes)
-                        .orderBy('posted', 'desc');
-  
-      if (company) {
-        query = query.where('company', '>=', company)
-                    .where('company', '<=', company + '\uf8ff');
+      if (cache.get(cacheKey)) {
+        console.log("Used from cache");
+        return res.json(cache.get(cacheKey));
       }
   
-      if (title) {
-        query = query.where('title', '>=', title)
-                    .where('title', '<=', title + '\uf8ff');
-      }
+      const jobTypes = roleType ? [roleType] : ['Internship', 'Full-time'];
   
-      if (cursor) {
-        query = query.startAfter(cursor);
-      }
+      const queryPromises = jobTypes.map(async (type) => {
+        const postsRef = db.collection('jobs').doc(type).collection('postings');
+        let query = postsRef.orderBy('posted', 'desc');
   
-      const snapshot = await query.limit(parsedLimit).get();
-      const jobs = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data(),
-        posted: doc.data().posted.toDate().toISOString()
-      }));
+        if (company) {
+          const companyLC = company.toLowerCase();
+          query = query.where('company_lower', '>=', companyLC)
+                       .where('company_lower', '<=', companyLC + '\uf8ff');
+        }
   
-      const response = {
-        jobs,
-        nextCursor: snapshot.docs[snapshot.docs.length - 1]?.id || null,
-        limit: parsedLimit
-      };
+        if (title) {
+          const titleLC = title.toLowerCase();
+          query = query.where('title_lower', '>=', titleLC)
+                       .where('title_lower', '<=', titleLC + '\uf8ff');
+        }
   
-      // Cache results
+        if (cursor) {
+          const cursorDate = new Date(cursor);
+          if (!isNaN(cursorDate)) {
+            query = query.startAfter(cursorDate);
+          }
+        }
+  
+        return query.limit(parsedLimit).get();
+      });
+  
+      const snapshots = await Promise.all(queryPromises);
+      let jobs = [];
+  
+      snapshots.forEach(snapshot => {
+        jobs = jobs.concat(snapshot.docs.map(doc => ({
+          id: doc.id,
+          ...doc.data(),
+          type: doc.ref.parent.parent.id,
+        })));
+      });
+  
+      // Sort globally
+      jobs.sort((a, b) => new Date(b.posted) - new Date(a.posted));
+      jobs = jobs.slice(0, parsedLimit);
+  
+      // Cursor = last job's posted date
+      const lastPosted = jobs.length > 0 ? jobs[jobs.length - 1].posted : null;
+      const nextCursor = lastPosted instanceof admin.firestore.Timestamp
+        ? lastPosted.toDate()
+        : new Date(lastPosted); // handles Date or string
+        
+      const response = { jobs, nextCursor, limit: parsedLimit };
       cache.set(cacheKey, response);
       res.json(response);
-  
     } catch (err) {
-      console.error('Error fetching jobs:', err);
-      res.status(500).json({ error: 'Failed to fetch jobs', details: err.message });
+      console.error('Error:', err);
+      res.status(500).json({ error: err.message });
     }
   });
+  
 
 
   // Batched Matches Operations
