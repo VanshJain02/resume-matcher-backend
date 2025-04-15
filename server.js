@@ -204,11 +204,14 @@ app.get('/api/jobs', async (req, res) => {
         let dateObj;
         
         if (rawDate instanceof admin.firestore.Timestamp) {
-          dateObj = rawDate.toDate();
-        } else {
-          // Parse as UTC explicitly
-          dateObj = new Date(rawDate.endsWith('Z') ? rawDate : rawDate + 'Z');
-        }
+            dateObj = rawDate.toDate();
+          } else if (typeof rawDate === 'string') {
+            dateObj = new Date(rawDate.endsWith('Z') ? rawDate : rawDate + 'Z');
+          } else {
+            console.warn(`Invalid date format in job document: ${doc.id}`);
+            return null; // Skip this job
+          }
+          
       
         return {
           id: doc.id,
