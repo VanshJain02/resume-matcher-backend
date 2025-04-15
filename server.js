@@ -13,7 +13,7 @@ const upload = multer({ storage: multer.memoryStorage() });
 const admin = require('firebase-admin');
 const FormData = require('form-data');
 const FieldValue = admin.firestore.FieldValue; // <-- Add this
-
+const { Filter } = require('firebase-admin/firestore');
 initializeApp({
   credential: cert({
     projectId: process.env.FIREBASE_PROJECT_ID,
@@ -23,6 +23,12 @@ initializeApp({
 });
 
 const db = getFirestore();
+
+// Cache setup
+const NodeCache = require('node-cache');
+const cache = new NodeCache({ stdTTL: 300 }); // 5-minute cache
+
+
 
 // Initialize Supabase (Server-Side Only)
 const supabase = createClient(
@@ -47,10 +53,23 @@ app.use(express.json());
 
 // Rate limiting
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100
-});
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: (req) => {
+      // Higher limits for authenticated users
+      return req.user ? 150 : 50; // 150 for logged-in, 50 for anonymous
+    },
+    keyGenerator: (req) => {
+      return req.user ? req.user.uid : req.ip;
+    },
+    handler: (req, res) => {
+      res.status(429).json({
+        error: "Too many requests",
+        retryAfter: "15 minutes"
+      });
+    }
+  });
 app.use(limiter);
+
 console.log('Starting server with environment:', {
     node_env: process.env.NODE_ENV,
     port: process.env.PORT,
@@ -90,26 +109,122 @@ console.log('Starting server with environment:', {
     }
   };
   
+
 // Secure Endpoints
-app.post('/api/matches', verifyUser, async (req, res) => {
-  try {
-    const { resumeText, jobDescription, matchResult } = req.body;
+
+
+// Optimized Jobs Endpoint
+app.get('/api/jobs', async (req, res) => {
+    try {
+      const { limit = 30, cursor, roleType, company, title } = req.query;
+      const parsedLimit = Math.min(parseInt(limit), 50);
+      const cacheKey = `jobs-${JSON.stringify(req.query)}`;
+  
+      // Check cache first
+      const cached = cache.get(cacheKey);
+      if (cached) return res.json(cached);
+  
+      const jobsRef = db.collection('jobs');
+      const jobTypes = roleType ? [roleType] : ['Internship', 'Full-time', 'Co-op'];
+      let query = jobsRef.where('type', 'in', jobTypes)
+                        .orderBy('posted', 'desc');
+  
+      if (company) {
+        query = query.where('company', '>=', company)
+                    .where('company', '<=', company + '\uf8ff');
+      }
+  
+      if (title) {
+        query = query.where('title', '>=', title)
+                    .where('title', '<=', title + '\uf8ff');
+      }
+  
+      if (cursor) {
+        query = query.startAfter(cursor);
+      }
+  
+      const snapshot = await query.limit(parsedLimit).get();
+      const jobs = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+        posted: doc.data().posted.toDate().toISOString()
+      }));
+  
+      const response = {
+        jobs,
+        nextCursor: snapshot.docs[snapshot.docs.length - 1]?.id || null,
+        limit: parsedLimit
+      };
+  
+      // Cache results
+      cache.set(cacheKey, response);
+      res.json(response);
+  
+    } catch (err) {
+      console.error('Error fetching jobs:', err);
+      res.status(500).json({ error: 'Failed to fetch jobs', details: err.message });
+    }
+  });
+
+
+  // Batched Matches Operations
+const matchesBatchHandler = async (req, res, operation) => {
+    try {
+      const batch = db.batch();
+      const matchesRef = db.collection('users').doc(req.user.uid).collection('matches');
+  
+      if (operation === 'create') {
+        const { resumeText, jobDescription, matchResult } = req.body;
+        const newDoc = matchesRef.doc();
+        batch.set(newDoc, {
+          resumeText,
+          jobDescription,
+          matchResult,
+          createdAt: FieldValue.serverTimestamp()
+        });
+        return { id: newDoc.id };
+      }
+  
+      if (operation === 'delete' && req.params.matchId) {
+        batch.delete(matchesRef.doc(req.params.matchId));
+      }
+  
+      await batch.commit();
+      return { success: true };
+    } catch (err) {
+      console.error(`Batch ${operation} error:`, err);
+      throw err;
+    }
+  };
+
+  app.post('/api/matches', verifyUser, async (req, res) => {
+    try {
+      const result = await matchesBatchHandler(req, res, 'create');
+      res.json(result);
+    } catch {
+      res.status(500).json({ error: 'Failed to save match' });
+    }
+  });
+
+// app.post('/api/matches', verifyUser, async (req, res) => {
+//   try {
+//     const { resumeText, jobDescription, matchResult } = req.body;
     
-    const matchesRef = db.collection('users').doc(req.user.uid).collection('matches');
+//     const matchesRef = db.collection('users').doc(req.user.uid).collection('matches');
     
-    const docRef = await matchesRef.add({
-      resumeText,
-      jobDescription,
-      matchResult,
-      createdAt: FieldValue.serverTimestamp()
-    });
-    console.log(docRef.id);
-    res.json({ id: docRef.id, success: true });
-  } catch (err) {
-    console.log(err);
-    res.status(500).json({ error: 'Failed to save match' });
-  }
-});
+//     const docRef = await matchesRef.add({
+//       resumeText,
+//       jobDescription,
+//       matchResult,
+//       createdAt: FieldValue.serverTimestamp()
+//     });
+//     console.log(docRef.id);
+//     res.json({ id: docRef.id, success: true });
+//   } catch (err) {
+//     console.log(err);
+//     res.status(500).json({ error: 'Failed to save match' });
+//   }
+// });
 
 app.get('/api/matches', verifyUser, async (req, res) => {
   try {
@@ -126,18 +241,25 @@ app.get('/api/matches', verifyUser, async (req, res) => {
   }
 });
 
+// app.delete('/api/matches/:matchId', verifyUser, async (req, res) => {
+//     try {
+//     const matchRef = db.collection('users').doc(req.user.uid)
+//                       .collection('matches').doc(req.params.matchId);
+//     await matchRef.delete();
+
+//     res.json({ success: true });
+//   } catch (err) {
+//     res.status(500).json({ error: 'Failed to delete match' });
+//   }
+// });
 app.delete('/api/matches/:matchId', verifyUser, async (req, res) => {
     try {
-    const matchRef = db.collection('users').doc(req.user.uid)
-                      .collection('matches').doc(req.params.matchId);
-    await matchRef.delete();
-
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to delete match' });
-  }
-});
-
+      await matchesBatchHandler(req, res, 'delete');
+      res.json({ success: true });
+    } catch {
+      res.status(500).json({ error: 'Failed to delete match' });
+    }
+  });
 
 
 app.post('/api/upload-resume', verifyUser, upload.single('file'), async (req, res) => {
@@ -238,51 +360,102 @@ app.delete('/api/resume', verifyUser, async (req, res) => {
   
 
 
-app.put('/api/profile', verifyUser, async (req, res) => {
-    try {
-      const profileData = req.body;
-      const userRef = db.collection('users').doc(req.user.uid);
-      // Add validation for profile data
-      if (!profileData || typeof profileData !== 'object') {
-        return res.status(400).json({ error: 'Invalid profile data' });
-      }
+// app.put('/api/profile', verifyUser, async (req, res) => {
+//     try {
+//       const profileData = req.body;
+//       const userRef = db.collection('users').doc(req.user.uid);
+//       // Add validation for profile data
+//       if (!profileData || typeof profileData !== 'object') {
+//         return res.status(400).json({ error: 'Invalid profile data' });
+//       }
   
-      // Remove sensitive fields if present
-      delete profileData.roles;
-      delete profileData.permissions;
+//       // Remove sensitive fields if present
+//       delete profileData.roles;
+//       delete profileData.permissions;
   
-      await userRef.set(
-        {
-          ...profileData,
-          lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
-        },
-        { merge: true }
-      );
-        res.json({ success: true });
-    } catch (err) {
-        console.error('Error in /api/profile:', err); // 👈 log the actual error
+//       await userRef.set(
+//         {
+//           ...profileData,
+//           lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
+//         },
+//         { merge: true }
+//       );
+//         res.json({ success: true });
+//     } catch (err) {
+//         console.error('Error in /api/profile:', err); // 👈 log the actual error
 
-      res.status(500).json({ error: 'Profile update failed' });
-    }
-  });
+//       res.status(500).json({ error: 'Profile update failed' });
+//     }
+//   });
   
-  app.get('/api/profile', verifyUser, async (req, res) => {
-    try {
-      const userRef = db.collection('users').doc(req.user.uid);
-      const docSnap = await userRef.get();
+//   app.get('/api/profile', verifyUser, async (req, res) => {
+//     try {
+//       const userRef = db.collection('users').doc(req.user.uid);
+//       const docSnap = await userRef.get();
       
-      if (!docSnap.exists) {
-        return res.status(404).json({ error: 'Profile not found' });
+//       if (!docSnap.exists) {
+//         return res.status(404).json({ error: 'Profile not found' });
+//       }
+  
+//       const profileData = docSnap.data();
+      
+  
+//       res.json(profileData);
+//     } catch (err) {
+//       res.status(500).json({ error: 'Failed to fetch profile' });
+//     }
+//   });
+
+// Optimized Profile Handling
+const profileCache = new NodeCache({ stdTTL: 120 });
+
+app.put('/api/profile', verifyUser, async (req, res) => {
+  try {
+    const profileData = req.body;
+    const userRef = db.collection('users').doc(req.user.uid);
+    
+    // Only update changed fields
+    const updateData = {};
+    const currentProfile = profileCache.get(req.user.uid) || {};
+    
+    Object.keys(profileData).forEach(key => {
+      if (profileData[key] !== currentProfile[key]) {
+        updateData[key] = profileData[key];
       }
-  
-      const profileData = docSnap.data();
-      
-  
-      res.json(profileData);
-    } catch (err) {
-      res.status(500).json({ error: 'Failed to fetch profile' });
+    });
+
+    if (Object.keys(updateData).length > 0) {
+      await userRef.update({
+        ...updateData,
+        lastUpdated: FieldValue.serverTimestamp()
+      });
+      profileCache.del(req.user.uid);
     }
-  });
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Profile update failed' });
+  }
+});
+
+app.get('/api/profile', verifyUser, async (req, res) => {
+  try {
+    const cacheKey = `profile-${req.user.uid}`;
+    const cached = profileCache.get(cacheKey);
+    if (cached) return res.json(cached);
+
+    const userRef = db.collection('users').doc(req.user.uid);
+    const docSnap = await userRef.get();
+    
+    if (!docSnap.exists) return res.status(404).json({ error: 'Profile not found' });
+
+    const profileData = docSnap.data();
+    profileCache.set(cacheKey, profileData);
+    res.json(profileData);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch profile' });
+  }
+});
 
 
 
@@ -311,20 +484,6 @@ app.put('/api/profile', verifyUser, async (req, res) => {
   });
   
 
-  // Proxy public job listings from Hugging Face
-app.get("/api/jobs", async (req, res) => {
-    try {
-      const response = await axios.get("https://vanshjain02-resume-matcher.hf.space/jobs");
-      res.json(response.data);
-    } catch (err) {
-      console.error("Error fetching jobs:", err.message);
-      res.status(500).json({ error: "Failed to fetch jobs" });
-    }
-  });
-
-  
-
-// Proxy to /match
 app.post("/api/match", upload.any(), async (req, res) => {
   try {
     const form = new FormData();
@@ -458,6 +617,50 @@ app.post('/api/generate-referral',
       }
     }
   );
+  app.get('/api/people', async (req, res) => {
+    const companyName = req.query.company;
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 6;
+  
+    try {
+      // Get company ID
+      const { data: companies, error: companyError } = await supabase
+        .from('companies')
+        .select('id')
+        .ilike('name', companyName);
+  
+      if (companyError) throw companyError;
+      if (!companies.length) return res.status(404).json({ error: 'Company not found' });
+  
+      // Calculate pagination
+      const startIndex = (page - 1) * limit;
+      
+      // Get total count
+      const { count } = await supabase
+        .from('people')
+        .select('*', { count: 'exact' })
+        .eq('company_id', companies[0].id);
+  
+      // Get paginated results
+      const { data: people, error: peopleError } = await supabase
+        .from('people')
+        .select('*')
+        .eq('company_id', companies[0].id)
+        .range(startIndex, startIndex + limit - 1);
+  
+      if (peopleError) throw peopleError;
+  
+      res.json({
+        people,
+        total: count,
+        page,
+        limit
+      });
+    } catch (error) {
+      console.error('Error fetching people:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
   
 
 const PORT = process.env.PORT || 3001;
