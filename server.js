@@ -110,73 +110,90 @@ console.log('Starting server with environment:', {
   };
   
 
-// Secure Endpoints
+  const generateCacheKey = (query) => {
+    const sortedParams = Object.keys(query).sort().reduce((acc, key) => {
+      acc[key] = query[key];
+      return acc;
+    }, {});
+    return `jobs-${JSON.stringify(sortedParams)}`;
+  };
 
+  // Migration script (run once)
+// const migrateJobs = async () => {
+//     const types = ['Internship', 'Full-time'];
+    
+//     for (const type of types) {
+//       const snapshot = await db.collection('jobs').doc(type).collection('postings').get();
+      
+//       for (const doc of snapshot.docs) {
+//         await db.collection('jobs').add({
+//           ...doc.data(),
+//           type: type, // Add type field
+//           company_lower: doc.data().company.toLowerCase(),
+//           title_lower: doc.data().title.toLowerCase()
+//         });
+//       }
+//     }
+//   };
+
+//   migrateJobs();
+// Secure Endpoints
 app.get('/api/jobs', async (req, res) => {
     try {
+      console.log("Fetching...");
       const { limit = 30, cursor, roleType, company, title } = req.query;
       const parsedLimit = Math.min(parseInt(limit), 30);
       const cacheKey = `jobs-${JSON.stringify(req.query)}`;
   
       if (cache.get(cacheKey)) {
-        console.log("Used from cache");
+        console.log("Using Cache");
         return res.json(cache.get(cacheKey));
       }
   
       const jobTypes = roleType ? [roleType] : ['Internship', 'Full-time'];
+      let query = db.collection('jobs')
+                   .where('type', 'in', jobTypes)
+                   .orderBy('posted', 'desc')
+                   .limit(parsedLimit);
   
-      const queryPromises = jobTypes.map(async (type) => {
-        const postsRef = db.collection('jobs').doc(type).collection('postings');
-        let query = postsRef.orderBy('posted', 'desc');
+      // Add filters
+      if (company) {
+        const companyLC = company.toLowerCase();
+        query = query.where('company_lower', '>=', companyLC)
+                     .where('company_lower', '<=', companyLC + '\uf8ff');
+      }
   
-        if (company) {
-          const companyLC = company.toLowerCase();
-          query = query.where('company_lower', '>=', companyLC)
-                       .where('company_lower', '<=', companyLC + '\uf8ff');
-        }
+      if (title) {
+        const titleLC = title.toLowerCase();
+        query = query.where('title_lower', '>=', titleLC)
+                     .where('title_lower', '<=', titleLC + '\uf8ff');
+      }
   
-        if (title) {
-          const titleLC = title.toLowerCase();
-          query = query.where('title_lower', '>=', titleLC)
-                       .where('title_lower', '<=', titleLC + '\uf8ff');
-        }
+      // Pagination
+      if (cursor) {
+        const cursorDate = new Date(cursor);
+        query = query.startAfter(cursorDate);
+      }
+      console.log("Fetched Using Firebase");
+      const snapshot = await query.get();
+      const jobs = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+        posted: doc.data().posted instanceof admin.firestore.Timestamp
+        ? doc.data().posted.toDate()
+        : new Date(doc.data().posted)      }));
   
-        if (cursor) {
-          const cursorDate = new Date(cursor);
-          if (!isNaN(cursorDate)) {
-            query = query.startAfter(cursorDate);
-          }
-        }
-  
-        return query.limit(parsedLimit).get();
-      });
-  
-      const snapshots = await Promise.all(queryPromises);
-      let jobs = [];
-  
-      snapshots.forEach(snapshot => {
-        jobs = jobs.concat(snapshot.docs.map(doc => ({
-          id: doc.id,
-          ...doc.data(),
-          type: doc.ref.parent.parent.id,
-        })));
-      });
-  
-      // Sort globally
-      jobs.sort((a, b) => new Date(b.posted) - new Date(a.posted));
-      jobs = jobs.slice(0, parsedLimit);
-  
-      // Cursor = last job's posted date
+      // Get next cursor
       const lastPosted = jobs.length > 0 ? jobs[jobs.length - 1].posted : null;
-      const nextCursor = lastPosted instanceof admin.firestore.Timestamp
-        ? lastPosted.toDate()
-        : new Date(lastPosted); // handles Date or string
-        
-      const response = { jobs, nextCursor, limit: parsedLimit };
-      cache.set(cacheKey, response);
+      const response = { 
+        jobs, 
+        nextCursor: lastPosted ? lastPosted.toISOString() : null,
+        limit: parsedLimit
+      };
+      cache.set(cacheKey, response, 600); // Cache for 10 minutes
       res.json(response);
     } catch (err) {
-      console.error('Error:', err);
+        console.log(err);
       res.status(500).json({ error: err.message });
     }
   });
