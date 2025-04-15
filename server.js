@@ -190,7 +190,9 @@ app.get('/api/jobs', async (req, res) => {
       const jobs = snapshot.docs.map(doc => ({
         id: doc.id,
         ...doc.data(),
-        posted: doc.data().posted.toDate().toISOString()
+        posted: doc.data().posted instanceof admin.firestore.Timestamp
+        ? doc.data().posted.toDate()
+        : new Date(doc.data().posted) 
       }));
   
       const response = {
