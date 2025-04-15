@@ -201,16 +201,23 @@ app.get('/api/jobs', async (req, res) => {
   
       const jobs = snapshot.docs.map(doc => {
         const rawDate = doc.data().posted;
-        let dateObj;
         
+        let dateObj = null;
         if (rawDate instanceof admin.firestore.Timestamp) {
-            dateObj = rawDate.toDate();
-          } else if (typeof rawDate === 'string') {
-            dateObj = new Date(rawDate.endsWith('Z') ? rawDate : rawDate + 'Z');
-          } else {
-            console.warn(`Invalid date format in job document: ${doc.id}`);
+        dateObj = rawDate.toDate();
+        } else if (typeof rawDate === 'string') {
+        const tryDate = new Date(rawDate.endsWith('Z') ? rawDate : rawDate + 'Z');
+        if (!isNaN(tryDate.getTime())) {
+            dateObj = tryDate;
+        } else {
+            console.warn(`Invalid string date in job document ${doc.id}:`, rawDate);
             return null; // Skip this job
-          }
+        }
+        } else {
+        console.warn(`Unknown date type in job document ${doc.id}:`, rawDate);
+        return null; // Skip this job
+        }
+
           
       
         return {
