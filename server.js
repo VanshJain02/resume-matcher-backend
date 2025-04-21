@@ -26,7 +26,7 @@ const db = getFirestore();
 
 // Cache setup
 const NodeCache = require('node-cache');
-const cache = new NodeCache({ stdTTL: 1800 }); // 5-minute cache
+const cache = new NodeCache({ stdTTL: 300 }); // 5-minute cache
 
 
 
